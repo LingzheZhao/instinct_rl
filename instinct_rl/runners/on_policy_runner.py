@@ -122,10 +122,8 @@ class OnPolicyRunner:
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
             )
         obs, extras = self.env.get_observations()
-        obs = obs.to(self.device)
-        critic_obs = extras["observations"].get("critic", None)
-        critic_obs = critic_obs.to(self.device) if critic_obs is not None else None
         self.train_mode()
+        obs, critic_obs, _ = self._prepare_observations(obs, extras)
 
         ep_infos = []
         step_infos = []
@@ -201,13 +199,22 @@ class OnPolicyRunner:
     def rollout_step(self, obs, critic_obs):
         actions = self.alg.act(obs, critic_obs)
         obs, rewards, dones, infos = self.env.step(actions)
+        obs, critic_obs, infos = self._prepare_observations(obs, infos)
+        rewards, dones = rewards.to(self.device), dones.to(self.device)
+        self.alg.process_env_step(rewards, dones, infos, obs, critic_obs)
+        return obs, critic_obs, rewards, dones, infos
+
+    def _prepare_observations(self, obs, infos):
+        """Move and normalize each raw observation group once, including at startup.
+
+        The environment may return its cached observation dictionary. Own the
+        mappings we replace so normalization never changes that raw cache.
+        """
+        infos = dict(infos)
+        infos["observations"] = dict(infos["observations"])
         critic_obs = infos["observations"].get("critic", None)
-        obs, critic_obs, rewards, dones = (
-            obs.to(self.device),
-            critic_obs.to(self.device) if critic_obs is not None else None,
-            rewards.to(self.device),
-            dones.to(self.device),
-        )
+        obs = obs.to(self.device)
+        critic_obs = critic_obs.to(self.device) if critic_obs is not None else None
         # Dealing with obs normalizers. At this line, obs and critic_obs and all observations in info are still flattened
         for obs_group_name, normalizer in self.normalizers.items():
             if obs_group_name == "policy":
@@ -218,9 +225,8 @@ class OnPolicyRunner:
                 critic_obs = normalizer(critic_obs)
                 infos["observations"]["critic"] = critic_obs
             else:
-                infos["observations"][obs_group_name] = normalizer(infos["observations"][obs_group_name])
-        self.alg.process_env_step(rewards, dones, infos, obs, critic_obs)
-        return obs, critic_obs, rewards, dones, infos
+                infos["observations"][obs_group_name] = normalizer(infos["observations"][obs_group_name].to(self.device))
+        return obs, critic_obs, infos
 
     """
     Logging
